@@ -2,24 +2,26 @@
 
 import { useMemo, useState } from 'react';
 
-type GenerateResponse = {
-  runId?: string;
-  outputPath?: string;
-  countsByFile?: {
-    vendors?: number;
-    pr_headers?: number;
-    pr_lines?: number;
-    po_headers?: number;
-    grns?: number;
-    invoices?: number;
-    payments?: number;
-    truth?: number;
-    manifest?: number;
-  };
-  truthCount?: number;
-  downloadUrl?: string;
+type CountsByFile = {
+  vendors?: number;
+  pr_headers?: number;
+  pr_lines?: number;
+  po_headers?: number;
+  grns?: number;
+  invoices?: number;
+  payments?: number;
+  truth?: number;
+  manifest?: number;
+};
 
-  // error payloads (both validation + runtime)
+type GenerateResult = {
+  runId: string;
+  truthCount: number;
+  countsByFile: Required<CountsByFile>;
+  outputPath: string; // in option A we just show "Downloaded"
+};
+
+type ApiErrorPayload = {
   error?: string;
   message?: string;
   details?: Array<{ path: string; message: string }>;
@@ -61,6 +63,15 @@ function yyyyToIntFromDate(dateStr: string) {
   return Number.isFinite(y) ? y : new Date().getFullYear();
 }
 
+function decodeCountsHeader(h: string | null): CountsByFile | null {
+  if (!h) return null;
+  try {
+    return JSON.parse(decodeURIComponent(h));
+  } catch {
+    return null;
+  }
+}
+
 export default function Home() {
   const [formData, setFormData] = useState({
     rows: '1000',
@@ -72,9 +83,8 @@ export default function Home() {
     advanced: '',
   });
 
-  const [result, setResult] = useState<GenerateResponse | null>(null);
+  const [result, setResult] = useState<GenerateResult | null>(null);
   const [loading, setLoading] = useState(false);
-
   const [uiError, setUiError] = useState<string | null>(null);
 
   const counts = useMemo(() => {
@@ -98,7 +108,6 @@ export default function Home() {
     setUiError(null);
     setResult(null);
 
-    // validate advanced JSON
     const parsedAdv = parseOptionalJson(formData.advanced);
     if (!parsedAdv.ok) {
       setUiError(parsedAdv.error);
@@ -106,7 +115,7 @@ export default function Home() {
       return;
     }
 
-    // allow seed to be number or string
+    // seed can be number or string
     const seedTrimmed = formData.seed.trim();
     const seedAsNumber = Number(seedTrimmed);
     const seed: number | string =
@@ -119,7 +128,7 @@ export default function Home() {
       startYear: yyyyToIntFromDate(formData.startDate),
       endYear: yyyyToIntFromDate(formData.endDate),
       pack: formData.pack,
-      anomalyConfig: parsedAdv.value, // can be null
+      anomalyConfig: parsedAdv.value, // can be null, server normalizes
     };
 
     try {
@@ -129,28 +138,63 @@ export default function Home() {
         body: JSON.stringify(payload),
       });
 
-      const data: GenerateResponse = await response.json().catch(() => ({}));
+      const contentType = response.headers.get('content-type') || '';
 
-      if (!response.ok) {
-        // build a readable error message from API payload
+      // If server responds with JSON, it's an error (validation/runtime)
+      if (contentType.includes('application/json')) {
+        const errJson: ApiErrorPayload = await response.json().catch(() => ({}));
         const detailsMsg =
-          data.details?.length
-            ? data.details.map((d) => `${d.path}: ${d.message}`).join('; ')
+          errJson.details?.length
+            ? errJson.details.map((d) => `${d.path}: ${d.message}`).join('; ')
             : null;
 
-        const msg =
-          detailsMsg ||
-          data.message ||
-          data.error ||
-          `Request failed (HTTP ${response.status})`;
-
+        const msg = detailsMsg || errJson.message || errJson.error || `Request failed (HTTP ${response.status})`;
         setUiError(msg);
-        setResult(data);
+        setLoading(false);
         return;
       }
 
-      // Success
-      setResult(data);
+      // Expect ZIP on success
+      if (!response.ok) {
+        setUiError(`Request failed (HTTP ${response.status})`);
+        setLoading(false);
+        return;
+      }
+
+      const runId = response.headers.get('x-run-id') || 'run';
+      const truthCount = Number(response.headers.get('x-truth-count') || '0');
+      const countsHeader = response.headers.get('x-counts');
+      const countsByFile = decodeCountsHeader(countsHeader) || {};
+
+      // Download ZIP
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `p2p-data-${runId}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+
+      // Show result summary
+      setResult({
+        runId,
+        truthCount,
+        outputPath: 'Downloaded as ZIP (serverless mode)',
+        countsByFile: {
+          vendors: safeNum(countsByFile.vendors),
+          pr_headers: safeNum(countsByFile.pr_headers),
+          pr_lines: safeNum(countsByFile.pr_lines),
+          po_headers: safeNum(countsByFile.po_headers),
+          grns: safeNum(countsByFile.grns),
+          invoices: safeNum(countsByFile.invoices),
+          payments: safeNum(countsByFile.payments),
+          truth: safeNum(countsByFile.truth),
+          manifest: safeNum(countsByFile.manifest),
+        },
+      });
     } catch (err) {
       setUiError(err instanceof Error ? err.message : 'Something went wrong');
     } finally {
@@ -210,9 +254,7 @@ export default function Home() {
                 required
                 placeholder="12345 or any text"
               />
-              <p className="text-xs text-gray-500 mt-1">
-                Same seed gives the same data. Can be a number or a word.
-              </p>
+              <p className="text-xs text-gray-500 mt-1">Same seed gives the same data. Can be a number or a word.</p>
             </div>
 
             <div>
@@ -285,7 +327,7 @@ export default function Home() {
             disabled={loading}
             className="w-full bg-indigo-600 text-white py-2 px-4 rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {loading ? 'Generating...' : 'Generate'}
+            {loading ? 'Generating...' : 'Generate & Download ZIP'}
           </button>
         </form>
 
@@ -300,48 +342,27 @@ export default function Home() {
           <div className="bg-white rounded-lg shadow-md p-6">
             <h2 className="text-xl font-semibold text-gray-900 mb-4">Generation Result</h2>
 
-            {/* If API returned an error payload but we still have a JSON body */}
-            {(result.error || result.message) && (
-              <div className="bg-yellow-50 border border-yellow-200 text-yellow-900 rounded-md p-3 mb-4">
-                <div className="font-medium">Server message</div>
-                <div className="text-sm">
-                  {result.message || result.error}
-                  {result.details?.length ? (
-                    <div className="mt-2">
-                      {result.details.map((d, idx) => (
-                        <div key={idx} className="text-xs font-mono">
-                          {d.path}: {d.message}
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-            )}
-
             <div className="space-y-3">
               <div>
                 <span className="font-medium text-gray-700">Run ID:</span>
-                <span className="ml-2 text-gray-900">{result.runId || '-'}</span>
+                <span className="ml-2 text-gray-900">{result.runId}</span>
               </div>
 
               <div>
-                <span className="font-medium text-gray-700">Output Path:</span>
-                <span className="ml-2 text-gray-900 font-mono text-sm">{result.outputPath || '-'}</span>
+                <span className="font-medium text-gray-700">Output:</span>
+                <span className="ml-2 text-gray-900">{result.outputPath}</span>
               </div>
 
               <div>
                 <span className="font-medium text-gray-700">Truth Count:</span>
-                <span className="ml-2 text-gray-900">{safeNum(result.truthCount)}</span>
+                <span className="ml-2 text-gray-900">{result.truthCount}</span>
               </div>
 
               <div className="mt-4">
                 <span className="font-medium text-gray-700">Counts by File:</span>
 
                 {!hasCounts ? (
-                  <div className="mt-2 text-sm text-gray-600">
-                    Counts not available (generation likely failed).
-                  </div>
+                  <div className="mt-2 text-sm text-gray-600">Counts not available.</div>
                 ) : (
                   <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-3">
                     <div className="bg-gray-50 p-2 rounded">
@@ -380,24 +401,9 @@ export default function Home() {
                 )}
               </div>
 
-              {result.downloadUrl ? (
-                <div className="mt-4 pt-4 border-t">
-                  <a
-                    href={result.downloadUrl}
-                    className="inline-flex items-center px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
-                  >
-                    <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                      />
-                    </svg>
-                    Download ZIP
-                  </a>
-                </div>
-              ) : null}
+              <div className="pt-3 text-sm text-gray-600">
+                ZIP downloads automatically when generation succeeds.
+              </div>
             </div>
           </div>
         )}
