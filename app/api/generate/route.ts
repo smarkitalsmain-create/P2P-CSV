@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as path from 'path';
+import * as fs from 'fs/promises';
 import { randomUUID } from 'crypto';
 import { z } from 'zod';
+
 import { runGeneration } from '../../../src/generator/runGeneration';
 import { allScenarioPacks } from '../../../src/scenarios';
 
@@ -12,7 +14,7 @@ const MAX_ROWS = 200000;
 const MAX_VENDORS = 50000;
 
 // Accept null and convert to {}.
-// Also allow seed as number OR string (better for reproducibility / named seeds).
+// Also allow seed as number OR string.
 const GenerateRequestSchema = z
   .object({
     poCount: z.number().int().positive().max(MAX_ROWS, `Maximum ${MAX_ROWS} rows allowed`),
@@ -24,11 +26,9 @@ const GenerateRequestSchema = z
 
     pack: z.string().optional(),
 
-    // key fix: allow null, default to {}
     anomalyConfig: z
       .union([z.record(z.any()), z.null(), z.undefined()])
-      .transform((v) => v ?? {})
-      .optional(),
+      .transform((v) => v ?? {}),
   })
   .refine((data) => data.endYear >= data.startYear, {
     message: 'endYear must be >= startYear',
@@ -63,9 +63,10 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Use runId consistently
+    // Vercel-safe writable directory
     const runId = randomUUID();
-    const outputDir = path.join(process.cwd(), 'out', runId);
+    const outputDir = path.join('/tmp', 'p2p-csv', runId);
+    await fs.mkdir(outputDir, { recursive: true });
 
     const runConfig = {
       seed: data.seed,
@@ -74,7 +75,7 @@ export async function POST(request: NextRequest) {
       startYear: data.startYear,
       endYear: data.endYear,
       pack: data.pack,
-      anomalyConfig: data.anomalyConfig ?? {}, // always object now
+      anomalyConfig: data.anomalyConfig, // always object due to transform
       outputDir,
 
       chunkSize: 10000,
@@ -83,16 +84,14 @@ export async function POST(request: NextRequest) {
       paymentRatio: 0.85,
     };
 
-    const result = await runGeneration(runConfig);
+    await runGeneration(runConfig);
 
-    // IMPORTANT: download should use the folder name (runId we created)
+    // Download should use our runId (folder name)
     const downloadUrl = `/api/download?runId=${runId}`;
 
     return NextResponse.json({
-      runId, // consistent with output folder + download
-      outputPath: result.outputPath,
-      countsByFile: result.countsByFile,
-      truthCount: result.truthCount,
+      runId,
+      outputPath: outputDir,
       downloadUrl,
     });
   } catch (error: any) {
