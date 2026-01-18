@@ -12,10 +12,6 @@ import type { GeneratorConfig } from "./baseGenerator";
 import type { AnomalyConfig } from "../anomalies/anomalyInjection";
 import type { PolicyConfig } from "../scenarios/types";
 
-// ============================================================================
-// Run Generation Configuration
-// ============================================================================
-
 export interface RunGenerationConfig {
   seed: number | string;
   vendorCount: number;
@@ -27,7 +23,6 @@ export interface RunGenerationConfig {
   pack?: string;
   scenario?: string;
 
-  // IMPORTANT: allow anomalies even without pack/scenario
   anomalyConfig?: Partial<AnomalyConfig>;
 
   outputDir?: string;
@@ -55,10 +50,6 @@ export interface RunGenerationResult {
   truthCount: number;
 }
 
-// ============================================================================
-// Run Generation Function
-// ============================================================================
-
 export async function runGeneration(config: RunGenerationConfig): Promise<RunGenerationResult> {
   const runId = config.outputDir?.split(path.sep).pop() || randomUUID();
 
@@ -71,33 +62,24 @@ export async function runGeneration(config: RunGenerationConfig): Promise<RunGen
   let policyConfig: PolicyConfig | undefined;
   let anomalyConfig: AnomalyConfig | undefined;
 
-  // ------------------------------------------------------------
-  // Scenario-specific defaults
-  // ------------------------------------------------------------
+  // Scenario defaults
   if (config.scenario) {
     const scenarioResult = getScenarioById(config.scenario);
-
     if (scenarioResult) {
       packName = scenarioResult.pack.packName;
       policyConfig = scenarioResult.scenario.policyConfig;
 
-      // Merge scenario anomaly config + provided override
       anomalyConfig = {
         seed: config.seed,
         ...(scenarioResult.scenario.anomalyConfig || {}),
         ...(config.anomalyConfig || {}),
       };
-
-      // NOTE: vendorCount/poCount are required in your interface, so we do not override them.
-      // If you later make them optional, this is where you’d apply datasetShape defaults.
     }
   }
 
-  // ------------------------------------------------------------
-  // Pack defaults (use first scenario as pack default)
-  // ------------------------------------------------------------
+  // Pack defaults
   if (!config.scenario && config.pack) {
-    const pack = allScenarioPacks.find(p => p.packName === config.pack);
+    const pack = allScenarioPacks.find((p) => p.packName === config.pack);
     if (pack && pack.scenarios.length > 0) {
       const firstScenario = pack.scenarios[0];
       policyConfig = firstScenario.policyConfig;
@@ -112,9 +94,7 @@ export async function runGeneration(config: RunGenerationConfig): Promise<RunGen
     }
   }
 
-  // ------------------------------------------------------------
-  // IMPORTANT FIX: Allow anomalyConfig even without pack/scenario
-  // ------------------------------------------------------------
+  // Allow anomalies even without pack/scenario
   if (!anomalyConfig && config.anomalyConfig) {
     anomalyConfig = {
       seed: config.seed,
@@ -122,7 +102,6 @@ export async function runGeneration(config: RunGenerationConfig): Promise<RunGen
     };
   }
 
-  // Build generator config
   const currentYear = new Date().getFullYear();
   const generatorConfig: GeneratorConfig = {
     seed: config.seed,
@@ -136,7 +115,6 @@ export async function runGeneration(config: RunGenerationConfig): Promise<RunGen
     paymentRatio: config.paymentRatio ?? 0.85,
   };
 
-  // Init CSV writer
   const csvWriter = new CSVWriter({
     outputDir,
     flushPerChunk: true,
@@ -151,17 +129,18 @@ export async function runGeneration(config: RunGenerationConfig): Promise<RunGen
     invoices: [] as any[],
     payments: [] as any[],
   };
+
   const allTruthRecords: any[] = [];
 
   // Vendors upfront
   const rng = seedrandom(String(config.seed));
   const random = () => rng();
+
   allData.vendors = generateVendors(config.vendorCount, random, generatorConfig.startYear);
   csvWriter.writeVendors(allData.vendors);
 
   // Chunk generation
   for (const chunk of generateChunkedData(generatorConfig)) {
-    // Write chunk
     csvWriter.writePRHeaders(chunk.prHeaders);
     csvWriter.writePRLines(chunk.prLines);
     csvWriter.writePOs(chunk.purchaseOrders);
@@ -169,7 +148,6 @@ export async function runGeneration(config: RunGenerationConfig): Promise<RunGen
     csvWriter.writeInvoices(chunk.invoices);
     csvWriter.writePayments(chunk.payments);
 
-    // Collect for injection + manifest
     allData.prHeaders.push(...chunk.prHeaders);
     allData.prLines.push(...chunk.prLines);
     allData.purchaseOrders.push(...chunk.purchaseOrders);
@@ -178,7 +156,7 @@ export async function runGeneration(config: RunGenerationConfig): Promise<RunGen
     allData.payments.push(...chunk.payments);
   }
 
-  // Inject anomalies if enabled
+  // Inject anomalies (note: this mutates arrays, but does NOT rewrite CSVs)
   if (anomalyConfig) {
     const injected = injectAnomalies(
       {
@@ -193,24 +171,18 @@ export async function runGeneration(config: RunGenerationConfig): Promise<RunGen
 
     allTruthRecords.push(...(injected.truthRecords || []));
 
-    // Update mutated data (vendors/PO/invoices/payments can change)
     allData.vendors = injected.vendors;
     allData.purchaseOrders = injected.purchaseOrders;
     allData.invoices = injected.invoices;
     allData.payments = injected.payments;
   }
 
-  // Write truth
   if (allTruthRecords.length > 0) {
     csvWriter.writeTruthRecords(allTruthRecords);
   }
 
-  // Manifest
   const manifest = generateManifest(
-    {
-      ...allData,
-      truthRecords: allTruthRecords,
-    },
+    { ...allData, truthRecords: allTruthRecords },
     generatorConfig,
     packName,
     anomalyConfig,
@@ -218,7 +190,8 @@ export async function runGeneration(config: RunGenerationConfig): Promise<RunGen
   );
   writeManifestSync(manifest, path.join(outputDir, "manifest.json"));
 
-  csvWriter.close();
+  // ✅ THIS IS THE IMPORTANT PART FOR VERCEL
+  await csvWriter.close();
 
   const countsByFile = {
     vendors: allData.vendors.length,
