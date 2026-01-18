@@ -1,0 +1,19 @@
+{
+  "seed": "42",
+  "dateRange": {
+    "startYear": 2025,
+    "endYear": 2026
+  },
+  "packName": "vendorMasterPack",
+  "counts": {
+    "vendors": 200000,
+    "purchaseOrders": 50000,
+    "grns": 39730,
+    "invoices": 45047,
+    "payments": 38270,
+    "prHeaders": 40000,
+    "prLines": 80069,
+    "truthRecords": 0
+  },
+  "expectedExceptionCountsByTestStep": {}
+}

@@ -1,0 +1,36 @@
+{
+  "name": "p2p-csv-generator",
+  "version": "1.0.0",
+  "description": "P2P CSV data generator with anomaly injection and optional UI",
+  "private": true,
+  "main": "src/cli.ts",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "gen": "ts-node --transpile-only src/cli.ts"
+  },
+  "dependencies": {
+    "@faker-js/faker": "^8.3.1",
+    "archiver": "^6.0.1",
+    "dayjs": "^1.11.10",
+    "fast-csv": "^4.3.6",
+    "next": "^14.0.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "seedrandom": "^3.0.5",
+    "zod": "^3.22.4",
+    "commander": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/archiver": "^6.0.2",
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "autoprefixer": "^10.4.0",
+    "postcss": "^8.4.0",
+    "tailwindcss": "^3.3.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.0.0"
+  }
+}

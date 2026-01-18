@@ -1,0 +1,18 @@
+{
+  "seed": "42",
+  "dateRange": {
+    "startYear": 2025,
+    "endYear": 2026
+  },
+  "counts": {
+    "vendors": 200000,
+    "purchaseOrders": 200000,
+    "grns": 159661,
+    "invoices": 180026,
+    "payments": 152982,
+    "prHeaders": 160000,
+    "prLines": 320387,
+    "truthRecords": 0
+  },
+  "expectedExceptionCountsByTestStep": {}
+}
