@@ -17,8 +17,8 @@ type CountsByFile = {
 type GenerateResult = {
   runId: string;
   truthCount: number;
-  countsByFile: Required<CountsByFile>;
-  outputPath: string; // in option A we just show "Downloaded"
+  countsByFile: CountsByFile;
+  outputLabel: string; // just a UI label, not a filesystem path
 };
 
 type ApiErrorPayload = {
@@ -42,9 +42,16 @@ function safeNum(n: unknown, fallback = 0) {
   return typeof n === 'number' && Number.isFinite(n) ? n : fallback;
 }
 
+function yyyyToIntFromDate(dateStr: string) {
+  const d = new Date(dateStr);
+  const y = d.getFullYear();
+  return Number.isFinite(y) ? y : new Date().getFullYear();
+}
+
 function parseOptionalJson(input: string): { ok: true; value: any } | { ok: false; error: string } {
   const trimmed = input.trim();
   if (!trimmed) return { ok: true, value: null };
+
   try {
     const parsed = JSON.parse(trimmed);
     if (parsed === null) return { ok: true, value: null };
@@ -57,12 +64,6 @@ function parseOptionalJson(input: string): { ok: true; value: any } | { ok: fals
   }
 }
 
-function yyyyToIntFromDate(dateStr: string) {
-  const d = new Date(dateStr);
-  const y = d.getFullYear();
-  return Number.isFinite(y) ? y : new Date().getFullYear();
-}
-
 function decodeCountsHeader(h: string | null): CountsByFile | null {
   if (!h) return null;
   try {
@@ -70,6 +71,25 @@ function decodeCountsHeader(h: string | null): CountsByFile | null {
   } catch {
     return null;
   }
+}
+
+async function readErrorFromResponse(res: Response): Promise<string> {
+  const ct = (res.headers.get('content-type') || '').toLowerCase();
+
+  // Try JSON error payload first
+  if (ct.includes('application/json')) {
+    const errJson: ApiErrorPayload = await res.json().catch(() => ({}));
+    const detailsMsg =
+      errJson.details?.length
+        ? errJson.details.map((d) => `${d.path}: ${d.message}`).join('; ')
+        : null;
+
+    return detailsMsg || errJson.message || errJson.error || `Request failed (HTTP ${res.status})`;
+  }
+
+  // Fallback: plain text
+  const text = await res.text().catch(() => '');
+  return text || `Request failed (HTTP ${res.status})`;
 }
 
 export default function Home() {
@@ -115,7 +135,7 @@ export default function Home() {
       return;
     }
 
-    // seed can be number or string
+    // seed: allow number or string
     const seedTrimmed = formData.seed.trim();
     const seedAsNumber = Number(seedTrimmed);
     const seed: number | string =
@@ -128,7 +148,7 @@ export default function Home() {
       startYear: yyyyToIntFromDate(formData.startDate),
       endYear: yyyyToIntFromDate(formData.endDate),
       pack: formData.pack,
-      anomalyConfig: parsedAdv.value, // can be null, server normalizes
+      anomalyConfig: parsedAdv.value, // can be null
     };
 
     try {
@@ -138,35 +158,19 @@ export default function Home() {
         body: JSON.stringify(payload),
       });
 
-      const contentType = response.headers.get('content-type') || '';
-
-      // If server responds with JSON, it's an error (validation/runtime)
-      if (contentType.includes('application/json')) {
-        const errJson: ApiErrorPayload = await response.json().catch(() => ({}));
-        const detailsMsg =
-          errJson.details?.length
-            ? errJson.details.map((d) => `${d.path}: ${d.message}`).join('; ')
-            : null;
-
-        const msg = detailsMsg || errJson.message || errJson.error || `Request failed (HTTP ${response.status})`;
-        setUiError(msg);
-        setLoading(false);
-        return;
-      }
-
-      // Expect ZIP on success
+      // 1) Handle errors first
       if (!response.ok) {
-        setUiError(`Request failed (HTTP ${response.status})`);
-        setLoading(false);
+        const msg = await readErrorFromResponse(response);
+        setUiError(msg);
         return;
       }
 
-      const runId = response.headers.get('x-run-id') || 'run';
+      // 2) Success: download ZIP
+      const runId = response.headers.get('x-run-id') || crypto?.randomUUID?.() || 'run';
       const truthCount = Number(response.headers.get('x-truth-count') || '0');
       const countsHeader = response.headers.get('x-counts');
       const countsByFile = decodeCountsHeader(countsHeader) || {};
 
-      // Download ZIP
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
 
@@ -176,24 +180,14 @@ export default function Home() {
       document.body.appendChild(a);
       a.click();
       a.remove();
+
       window.URL.revokeObjectURL(url);
 
-      // Show result summary
       setResult({
         runId,
         truthCount,
-        outputPath: 'Downloaded as ZIP (serverless mode)',
-        countsByFile: {
-          vendors: safeNum(countsByFile.vendors),
-          pr_headers: safeNum(countsByFile.pr_headers),
-          pr_lines: safeNum(countsByFile.pr_lines),
-          po_headers: safeNum(countsByFile.po_headers),
-          grns: safeNum(countsByFile.grns),
-          invoices: safeNum(countsByFile.invoices),
-          payments: safeNum(countsByFile.payments),
-          truth: safeNum(countsByFile.truth),
-          manifest: safeNum(countsByFile.manifest),
-        },
+        outputLabel: 'Downloaded ZIP (serverless mode)',
+        countsByFile,
       });
     } catch (err) {
       setUiError(err instanceof Error ? err.message : 'Something went wrong');
@@ -350,7 +344,7 @@ export default function Home() {
 
               <div>
                 <span className="font-medium text-gray-700">Output:</span>
-                <span className="ml-2 text-gray-900">{result.outputPath}</span>
+                <span className="ml-2 text-gray-900">{result.outputLabel}</span>
               </div>
 
               <div>
@@ -401,9 +395,7 @@ export default function Home() {
                 )}
               </div>
 
-              <div className="pt-3 text-sm text-gray-600">
-                ZIP downloads automatically when generation succeeds.
-              </div>
+              <div className="pt-3 text-sm text-gray-600">ZIP downloads automatically when generation succeeds.</div>
             </div>
           </div>
         )}
