@@ -1,26 +1,29 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 
-interface GenerateResponse {
-  runId: string;
-  outputPath: string;
-  countsByFile: {
-    vendors: number;
-    pr_headers: number;
-    pr_lines: number;
-    po_headers: number;
-    grns: number;
-    invoices: number;
-    payments: number;
-    truth: number;
-    manifest: number;
+type GenerateResponse = {
+  runId?: string;
+  outputPath?: string;
+  countsByFile?: {
+    vendors?: number;
+    pr_headers?: number;
+    pr_lines?: number;
+    po_headers?: number;
+    grns?: number;
+    invoices?: number;
+    payments?: number;
+    truth?: number;
+    manifest?: number;
   };
-  truthCount: number;
+  truthCount?: number;
   downloadUrl?: string;
+
+  // error payloads (both validation + runtime)
   error?: string;
+  message?: string;
   details?: Array<{ path: string; message: string }>;
-}
+};
 
 const KNOWN_PACKS = [
   { value: 'vendor_master_pack', label: 'Vendor Master Pack' },
@@ -33,6 +36,31 @@ const KNOWN_PACKS = [
   { value: 'fraud_sod_pack', label: 'Fraud & SOD Pack' },
 ];
 
+function safeNum(n: unknown, fallback = 0) {
+  return typeof n === 'number' && Number.isFinite(n) ? n : fallback;
+}
+
+function parseOptionalJson(input: string): { ok: true; value: any } | { ok: false; error: string } {
+  const trimmed = input.trim();
+  if (!trimmed) return { ok: true, value: null };
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed === null) return { ok: true, value: null };
+    if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { ok: false, error: 'Advanced JSON must be an object like {"missing_pan_pct": 10}' };
+    }
+    return { ok: true, value: parsed };
+  } catch {
+    return { ok: false, error: 'Invalid JSON in Advanced anomalies field' };
+  }
+}
+
+function yyyyToIntFromDate(dateStr: string) {
+  const d = new Date(dateStr);
+  const y = d.getFullYear();
+  return Number.isFinite(y) ? y : new Date().getFullYear();
+}
+
 export default function Home() {
   const [formData, setFormData] = useState({
     rows: '1000',
@@ -43,63 +71,94 @@ export default function Home() {
     pack: 'vendor_master_pack',
     advanced: '',
   });
+
   const [result, setResult] = useState<GenerateResponse | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+
+  const [uiError, setUiError] = useState<string | null>(null);
+
+  const counts = useMemo(() => {
+    const c = result?.countsByFile;
+    return {
+      vendors: safeNum(c?.vendors),
+      pr_headers: safeNum(c?.pr_headers),
+      pr_lines: safeNum(c?.pr_lines),
+      po_headers: safeNum(c?.po_headers),
+      grns: safeNum(c?.grns),
+      invoices: safeNum(c?.invoices),
+      payments: safeNum(c?.payments),
+      truth: safeNum(c?.truth),
+      manifest: safeNum(c?.manifest),
+    };
+  }, [result]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-    setError(null);
+    setUiError(null);
     setResult(null);
 
+    // validate advanced JSON
+    const parsedAdv = parseOptionalJson(formData.advanced);
+    if (!parsedAdv.ok) {
+      setUiError(parsedAdv.error);
+      setLoading(false);
+      return;
+    }
+
+    // allow seed to be number or string
+    const seedTrimmed = formData.seed.trim();
+    const seedAsNumber = Number(seedTrimmed);
+    const seed: number | string =
+      seedTrimmed !== '' && Number.isFinite(seedAsNumber) ? seedAsNumber : seedTrimmed;
+
+    const payload = {
+      poCount: Number(formData.rows),
+      vendorCount: Number(formData.vendors),
+      seed,
+      startYear: yyyyToIntFromDate(formData.startDate),
+      endYear: yyyyToIntFromDate(formData.endDate),
+      pack: formData.pack,
+      anomalyConfig: parsedAdv.value, // can be null
+    };
+
     try {
-      let anomaliesJson: any = null;
-      if (formData.advanced.trim()) {
-        try {
-          anomaliesJson = JSON.parse(formData.advanced);
-        } catch (parseError) {
-          setError('Invalid JSON in advanced anomalies field');
-          setLoading(false);
-          return;
-        }
-      }
-
-      const config = {
-        poCount: parseInt(formData.rows),
-        vendorCount: parseInt(formData.vendors),
-        seed: parseInt(formData.seed),
-        startYear: new Date(formData.startDate).getFullYear(),
-        endYear: new Date(formData.endDate).getFullYear(),
-        pack: formData.pack,
-        anomalyConfig: anomaliesJson,
-      };
-
       const response = await fetch('/api/generate', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(config),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
       });
 
+      const data: GenerateResponse = await response.json().catch(() => ({}));
+
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
-        if (errorData.details && Array.isArray(errorData.details)) {
-          const detailsMsg = errorData.details.map((d: any) => `${d.path}: ${d.message}`).join('; ');
-          throw new Error(`${errorData.error || 'Validation failed'}: ${detailsMsg}`);
-        }
-        throw new Error(errorData.error || errorData.message || `HTTP error! status: ${response.status}`);
+        // build a readable error message from API payload
+        const detailsMsg =
+          data.details?.length
+            ? data.details.map((d) => `${d.path}: ${d.message}`).join('; ')
+            : null;
+
+        const msg =
+          detailsMsg ||
+          data.message ||
+          data.error ||
+          `Request failed (HTTP ${response.status})`;
+
+        setUiError(msg);
+        setResult(data);
+        return;
       }
 
-      const data = await response.json();
+      // Success
       setResult(data);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred');
+      setUiError(err instanceof Error ? err.message : 'Something went wrong');
     } finally {
       setLoading(false);
     }
   };
+
+  const hasCounts = !!result?.countsByFile;
 
   return (
     <div className="min-h-screen bg-gray-50 py-8 px-4">
@@ -143,13 +202,17 @@ export default function Home() {
                 Seed
               </label>
               <input
-                type="number"
+                type="text"
                 id="seed"
                 value={formData.seed}
                 onChange={(e) => setFormData({ ...formData, seed: e.target.value })}
                 className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
                 required
+                placeholder="12345 or any text"
               />
+              <p className="text-xs text-gray-500 mt-1">
+                Same seed gives the same data. Can be a number or a word.
+              </p>
             </div>
 
             <div>
@@ -212,6 +275,9 @@ export default function Home() {
               className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 font-mono text-sm"
               placeholder='{"missing_pan_pct": 10, "duplicate_vendor_pan_pct": 5}'
             />
+            <p className="text-xs text-gray-500 mt-1">
+              Leave empty for a clean dataset. Use percentages to inject errors for BizPulse testing.
+            </p>
           </div>
 
           <button
@@ -223,79 +289,104 @@ export default function Home() {
           </button>
         </form>
 
-        {error && (
+        {uiError && (
           <div className="bg-red-50 border border-red-200 text-red-800 rounded-md p-4 mb-6">
             <p className="font-medium">Error</p>
-            <p>{error}</p>
+            <p>{uiError}</p>
           </div>
         )}
 
         {result && (
           <div className="bg-white rounded-lg shadow-md p-6">
             <h2 className="text-xl font-semibold text-gray-900 mb-4">Generation Result</h2>
+
+            {/* If API returned an error payload but we still have a JSON body */}
+            {(result.error || result.message) && (
+              <div className="bg-yellow-50 border border-yellow-200 text-yellow-900 rounded-md p-3 mb-4">
+                <div className="font-medium">Server message</div>
+                <div className="text-sm">
+                  {result.message || result.error}
+                  {result.details?.length ? (
+                    <div className="mt-2">
+                      {result.details.map((d, idx) => (
+                        <div key={idx} className="text-xs font-mono">
+                          {d.path}: {d.message}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            )}
+
             <div className="space-y-3">
               <div>
                 <span className="font-medium text-gray-700">Run ID:</span>
-                <span className="ml-2 text-gray-900">{result.runId}</span>
+                <span className="ml-2 text-gray-900">{result.runId || '-'}</span>
               </div>
+
               <div>
                 <span className="font-medium text-gray-700">Output Path:</span>
-                <span className="ml-2 text-gray-900 font-mono text-sm">{result.outputPath}</span>
+                <span className="ml-2 text-gray-900 font-mono text-sm">{result.outputPath || '-'}</span>
               </div>
+
               <div>
                 <span className="font-medium text-gray-700">Truth Count:</span>
-                <span className="ml-2 text-gray-900">{result.truthCount}</span>
+                <span className="ml-2 text-gray-900">{safeNum(result.truthCount)}</span>
               </div>
+
               <div className="mt-4">
                 <span className="font-medium text-gray-700">Counts by File:</span>
-                <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <div className="bg-gray-50 p-2 rounded">
-                    <div className="text-xs text-gray-500">Vendors</div>
-                    <div className="text-lg font-semibold">{result.countsByFile.vendors}</div>
+
+                {!hasCounts ? (
+                  <div className="mt-2 text-sm text-gray-600">
+                    Counts not available (generation likely failed).
                   </div>
-                  <div className="bg-gray-50 p-2 rounded">
-                    <div className="text-xs text-gray-500">PR Headers</div>
-                    <div className="text-lg font-semibold">{result.countsByFile.pr_headers}</div>
+                ) : (
+                  <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div className="bg-gray-50 p-2 rounded">
+                      <div className="text-xs text-gray-500">Vendors</div>
+                      <div className="text-lg font-semibold">{counts.vendors}</div>
+                    </div>
+                    <div className="bg-gray-50 p-2 rounded">
+                      <div className="text-xs text-gray-500">PR Headers</div>
+                      <div className="text-lg font-semibold">{counts.pr_headers}</div>
+                    </div>
+                    <div className="bg-gray-50 p-2 rounded">
+                      <div className="text-xs text-gray-500">PR Lines</div>
+                      <div className="text-lg font-semibold">{counts.pr_lines}</div>
+                    </div>
+                    <div className="bg-gray-50 p-2 rounded">
+                      <div className="text-xs text-gray-500">PO Headers</div>
+                      <div className="text-lg font-semibold">{counts.po_headers}</div>
+                    </div>
+                    <div className="bg-gray-50 p-2 rounded">
+                      <div className="text-xs text-gray-500">GRNs</div>
+                      <div className="text-lg font-semibold">{counts.grns}</div>
+                    </div>
+                    <div className="bg-gray-50 p-2 rounded">
+                      <div className="text-xs text-gray-500">Invoices</div>
+                      <div className="text-lg font-semibold">{counts.invoices}</div>
+                    </div>
+                    <div className="bg-gray-50 p-2 rounded">
+                      <div className="text-xs text-gray-500">Payments</div>
+                      <div className="text-lg font-semibold">{counts.payments}</div>
+                    </div>
+                    <div className="bg-gray-50 p-2 rounded">
+                      <div className="text-xs text-gray-500">Truth Records</div>
+                      <div className="text-lg font-semibold">{counts.truth}</div>
+                    </div>
                   </div>
-                  <div className="bg-gray-50 p-2 rounded">
-                    <div className="text-xs text-gray-500">PR Lines</div>
-                    <div className="text-lg font-semibold">{result.countsByFile.pr_lines}</div>
-                  </div>
-                  <div className="bg-gray-50 p-2 rounded">
-                    <div className="text-xs text-gray-500">PO Headers</div>
-                    <div className="text-lg font-semibold">{result.countsByFile.po_headers}</div>
-                  </div>
-                  <div className="bg-gray-50 p-2 rounded">
-                    <div className="text-xs text-gray-500">GRNs</div>
-                    <div className="text-lg font-semibold">{result.countsByFile.grns}</div>
-                  </div>
-                  <div className="bg-gray-50 p-2 rounded">
-                    <div className="text-xs text-gray-500">Invoices</div>
-                    <div className="text-lg font-semibold">{result.countsByFile.invoices}</div>
-                  </div>
-                  <div className="bg-gray-50 p-2 rounded">
-                    <div className="text-xs text-gray-500">Payments</div>
-                    <div className="text-lg font-semibold">{result.countsByFile.payments}</div>
-                  </div>
-                  <div className="bg-gray-50 p-2 rounded">
-                    <div className="text-xs text-gray-500">Truth Records</div>
-                    <div className="text-lg font-semibold">{result.countsByFile.truth}</div>
-                  </div>
-                </div>
+                )}
               </div>
-              {result.downloadUrl && (
+
+              {result.downloadUrl ? (
                 <div className="mt-4 pt-4 border-t">
                   <a
                     href={result.downloadUrl}
-                    download
                     className="inline-flex items-center px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
                   >
-                    <svg
-                      className="w-5 h-5 mr-2"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
-                    >
+                    <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path
                         strokeLinecap="round"
                         strokeLinejoin="round"
@@ -306,7 +397,7 @@ export default function Home() {
                     Download ZIP
                   </a>
                 </div>
-              )}
+              ) : null}
             </div>
           </div>
         )}
