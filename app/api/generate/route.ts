@@ -8,13 +8,11 @@ import { runGeneration } from '../../../src/generator/runGeneration';
 import { allScenarioPacks } from '../../../src/scenarios';
 
 export const runtime = 'nodejs';
-export const maxDuration = 300; // 5 minutes
+export const maxDuration = 300;
 
 const MAX_ROWS = 200000;
 const MAX_VENDORS = 50000;
 
-// Accept null and convert to {}.
-// Also allow seed as number OR string.
 const GenerateRequestSchema = z
   .object({
     poCount: z.number().int().positive().max(MAX_ROWS, `Maximum ${MAX_ROWS} rows allowed`),
@@ -30,7 +28,7 @@ const GenerateRequestSchema = z
       .union([z.record(z.any()), z.null(), z.undefined()])
       .transform((v) => v ?? {}),
   })
-  .refine((data) => data.endYear >= data.startYear, {
+  .refine((d) => d.endYear >= d.startYear, {
     message: 'endYear must be >= startYear',
     path: ['endYear'],
   });
@@ -38,8 +36,8 @@ const GenerateRequestSchema = z
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-
     const parsed = GenerateRequestSchema.safeParse(body);
+
     if (!parsed.success) {
       return NextResponse.json(
         {
@@ -55,7 +53,6 @@ export async function POST(request: NextRequest) {
 
     const data = parsed.data;
 
-    // Validate pack if provided
     if (data.pack) {
       const pack = allScenarioPacks.find((p) => p.packName === data.pack);
       if (!pack) {
@@ -63,46 +60,36 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Vercel-safe writable directory
     const runId = randomUUID();
     const outputDir = path.join('/tmp', 'p2p-csv', runId);
     await fs.mkdir(outputDir, { recursive: true });
 
-    const runConfig = {
+    const result = await runGeneration({
       seed: data.seed,
       vendorCount: data.vendorCount,
       poCount: data.poCount,
       startYear: data.startYear,
       endYear: data.endYear,
       pack: data.pack,
-      anomalyConfig: data.anomalyConfig, // always object due to transform
+      anomalyConfig: data.anomalyConfig,
       outputDir,
-
       chunkSize: 10000,
       grnRatio: 0.8,
       invoiceRatio: 0.9,
       paymentRatio: 0.85,
-    };
-
-    await runGeneration(runConfig);
-
-    // Download should use our runId (folder name)
-    const downloadUrl = `/api/download?runId=${runId}`;
+    });
 
     return NextResponse.json({
       runId,
-      outputPath: outputDir,
-      downloadUrl,
+      outputPath: result.outputPath,
+      countsByFile: result.countsByFile,   // THIS is what UI needs
+      truthCount: result.truthCount,       // THIS is what UI needs
+      downloadUrl: `/api/download?runId=${runId}`,
     });
   } catch (error: any) {
     console.error('Generation error:', error);
-
     return NextResponse.json(
-      {
-        error: 'Generation failed',
-        message: error?.message || 'Unknown error occurred',
-        ...(process.env.NODE_ENV === 'development' && { stack: error?.stack }),
-      },
+      { error: 'Generation failed', message: error?.message || 'Unknown error occurred' },
       { status: 500 }
     );
   }
